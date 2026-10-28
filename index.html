@@ -1,0 +1,106 @@
+<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="小説朗読">
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon.png"><meta name="theme-color" content="#1b1b1f">
+<title>小説朗読</title><style>
+:root{--bg:#fbf8f1;--fg:#222;--sub:#666;--hl:#ffe58a;--card:#fff;--bd:#ddd}
+@media(prefers-color-scheme:dark){:root{--bg:#17171a;--fg:#e8e6e1;--sub:#999;--hl:#5a4a12;--card:#232327;--bd:#3a3a40}}
+body.dark{--bg:#17171a;--fg:#e8e6e1;--sub:#999;--hl:#5a4a12;--card:#232327;--bd:#3a3a40}
+body.light{--bg:#fbf8f1;--fg:#222;--sub:#666;--hl:#ffe58a;--card:#fff;--bd:#ddd}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Hiragino Mincho ProN",serif;padding:env(safe-area-inset-top) 0 0}
+header{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--bd);padding:8px;display:flex;gap:6px;flex-wrap:wrap;z-index:5}
+button,select{font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg)}
+#text{padding:16px 18px 200px;font-size:var(--fs,21px);line-height:1.9;max-width:760px;margin:auto}
+#text h2{font-size:1.2em;margin:1.6em 0 .6em}p{margin:0 0 .8em}.s{cursor:pointer;border-radius:4px}.s.on{background:var(--hl)}
+#player{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--bd);padding:8px 8px calc(8px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:6px;z-index:5}
+.row{display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap}.row button{min-width:56px;font-size:20px}
+#panel{display:none;position:fixed;inset:0;background:var(--bg);overflow:auto;z-index:10;padding:calc(env(safe-area-inset-top) + 12px) 16px 40px}
+#panel.open{display:block}#panel li{padding:10px 4px;border-bottom:1px solid var(--bd);list-style:none;cursor:pointer}
+label{font-size:14px;color:var(--sub)}input[type=range]{width:120px}#empty{color:var(--sub);text-align:center;margin-top:30vh}
+</style></head><body>
+<header><button id="bOpen">📂 開く</button><button id="bLib">📚 本棚</button><button id="bToc">📑 目次</button><button id="bSet">⚙️</button>
+<input type="file" id="file" accept=".txt,text/plain" multiple hidden></header>
+<div id="text"><div id="empty">「📂 開く」から、ファイルアプリの小説テキスト(.txt)を選んでください。<br>複数ファイルもまとめて選べます。</div></div>
+<div id="player"><div class="row" id="info" style="font-size:13px;color:var(--sub)"></div>
+<div class="row"><button id="bPrev">⏮</button><button id="bPlay">▶️</button><button id="bStop">⏹</button><button id="bNext">⏭</button></div></div>
+<div id="panel"></div>
+<script>
+const $=s=>document.querySelector(s);let S=JSON.parse(localStorage.nr_set||'{}');S={rate:1,pitch:1,fs:21,voice:'',theme:'',...S};
+let book=null,sents=[],cur=0,playing=false,voices=[],gen=0;
+// ---- IndexedDB ----
+const dbp=new Promise((res,rej)=>{const r=indexedDB.open('novelreader',1);r.onupgradeneeded=()=>r.result.createObjectStore('books',{keyPath:'id'});r.onsuccess=()=>res(r.result);r.onerror=rej});
+async function tx(m,f){const db=await dbp;return new Promise((res,rej)=>{const t=db.transaction('books',m),st=t.objectStore('books'),r=f(st);t.oncomplete=()=>res(r&&r.result);t.onerror=rej})}
+const putBook=b=>tx('readwrite',s=>s.put(b)),getBook=id=>tx('readonly',s=>s.get(id)),allBooks=()=>tx('readonly',s=>s.getAll()),delBook=id=>tx('readwrite',s=>s.delete(id));
+// ---- decode ----
+function decode(buf){const u=new Uint8Array(buf);
+ if(u[0]==0xEF&&u[1]==0xBB&&u[2]==0xBF)return new TextDecoder('utf-8').decode(u.subarray(3));
+ if(u[0]==0xFF&&u[1]==0xFE)return new TextDecoder('utf-16le').decode(u);if(u[0]==0xFE&&u[1]==0xFF)return new TextDecoder('utf-16be').decode(u);
+ try{return new TextDecoder('utf-8',{fatal:true}).decode(u)}catch(e){}
+ for(const enc of['shift_jis','euc-jp']){try{const t=new TextDecoder(enc,{fatal:true}).decode(u);return t}catch(e){}}
+ return new TextDecoder('shift_jis').decode(u)}
+// ---- parse ----
+const HEAD=/^\s*(?:[#＃]+\s*.+|[【\[]?\s*(?:第\s*[0-9０-９一二三四五六七八九十百千零〇]+\s*[話章部節幕巻回]|プロローグ|エピローグ|序章|終章|番外編|幕間).{0,40}|(?:chapter|episode)\s*\d+.*)$/i;
+function splitSent(p){const out=[];let re=/[^。！？!?…]*(?:[。！？!?]+|…+)?[」』）)]*/g,m;while((m=re.exec(p))&&m[0]){out.push(m[0]);if(re.lastIndex>=p.length)break}
+ const r=[];for(let s of out){while(s.length>120){let k=s.lastIndexOf('、',120);if(k<20)k=120;r.push(s.slice(0,k+1));s=s.slice(k+1)}if(s.trim())r.push(s)}return r}
+function parse(text,title){text=text.replace(/\r\n?/g,'\n');const lines=text.split('\n'),ch=[];let c={title:title,paras:[]};
+ for(const l of lines){const t=l.trim();if(!t)continue;if(HEAD.test(t)&&t.length<60){if(c.paras.length||ch.length)ch.push(c);c={title:t.replace(/^[#＃]+\s*/,''),paras:[]}}else c.paras.push(t)}
+ ch.push(c);return ch.filter(x=>x.paras.length||x.title)}
+// ---- render ----
+function render(){const el=$('#text');el.innerHTML='';sents=[];let pi=0;
+ book.chapters.forEach((c,ci)=>{const h=document.createElement('h2');h.id='c'+ci;h.dataset.first=sents.length;
+  addS(h,c.title,ci,pi++);el.appendChild(h);
+  c.paras.forEach(p=>{const pe=document.createElement('p');splitSent(p).forEach(s=>addS(pe,s,ci,pi));pi++;el.appendChild(pe)})})
+ function addS(par,s,ci,pi){const sp=document.createElement('span');sp.className='s';sp.textContent=s;const i=sents.length;sp.onclick=()=>{go(i,playing)};par.appendChild(sp);sents.push({t:s,el:sp,ci,pi})}
+ mark(false)}
+function mark(scroll=true){document.querySelectorAll('.s.on').forEach(e=>e.classList.remove('on'));const s=sents[cur];if(!s)return;s.el.classList.add('on');
+ if(scroll)s.el.scrollIntoView({block:'center',behavior:'smooth'});$('#info').textContent=book.title+' ／ '+book.chapters[s.ci].title+' ('+Math.round(cur/sents.length*100)+'%)';
+ if(book){book.pos=cur;book.at=Date.now();clearTimeout(mark.t);mark.t=setTimeout(()=>{putBook(book);localStorage.nr_last=book.id},400)}}
+// ---- speech ----
+const syn=window.speechSynthesis;
+function loadVoices(){voices=syn.getVoices().filter(v=>/^ja/i.test(v.lang));}
+if(syn){loadVoices();syn.onvoiceschanged=loadVoices}
+function speak(){if(!playing||cur>=sents.length){if(cur>=sents.length)setPlay(false);return}
+ const my=++gen,s=sents[cur],u=new SpeechSynthesisUtterance(s.t.replace(/[「」『』【】]/g,' '));u.lang='ja-JP';u.rate=S.rate;u.pitch=S.pitch;
+ const v=voices.find(v=>v.voiceURI==S.voice)||voices[0];if(v)u.voice=v;
+ u.onend=()=>{if(my!==gen||!playing)return;if(cur<sents.length-1){cur++;mark();speak()}else setPlay(false)};
+ u.onerror=e=>{if(my!==gen)return;if(e.error!='interrupted'&&e.error!='canceled'&&playing){cur++;mark();setTimeout(speak,50)}};
+ mark();syn.speak(u)}
+function setPlay(p){playing=p;$('#bPlay').textContent=p?'⏸':'▶️'}
+function play(){if(!book)return;if(!syn){alert('この端末は読み上げに対応していません');return}setPlay(true);syn.cancel();gen++;setTimeout(speak,60)}
+function pause(){setPlay(false);gen++;syn.cancel()}
+function go(i,cont){cur=Math.max(0,Math.min(sents.length-1,i));if(cont){syn.cancel();gen++;setTimeout(speak,60)}else mark()}
+function paraJump(d){const p=sents[cur].pi;let i=cur;if(d>0){while(i<sents.length&&sents[i].pi==p)i++}else{while(i>0&&sents[i].pi==p)i--;const q=sents[i].pi;while(i>0&&sents[i-1].pi==q)i--}go(i,playing)}
+$('#bPlay').onclick=()=>playing?pause():play();$('#bStop').onclick=()=>{pause()};
+$('#bPrev').onclick=()=>book&&paraJump(-1);$('#bNext').onclick=()=>book&&paraJump(1);
+// ---- files ----
+$('#bOpen').onclick=()=>$('#file').click();
+$('#file').onchange=async e=>{const fs=[...e.target.files].sort((a,b)=>a.name.localeCompare(b.name,'ja',{numeric:true}));if(!fs.length)return;
+ let title=fs.length==1?fs[0].name.replace(/\.txt$/i,''):fs[0].name.replace(/\.txt$/i,'')+' ほか'+(fs.length-1)+'件',chapters=[];
+ for(const f of fs){const t=decode(await f.arrayBuffer());const n=f.name.replace(/\.txt$/i,'');chapters.push(...parse(t,n))}
+ const b={id:'b'+Date.now(),title,chapters,pos:0,at:Date.now()};await putBook(b);e.target.value='';openBook(b)};
+function openBook(b){pause();book=b;render();cur=Math.min(b.pos||0,sents.length-1);mark();localStorage.nr_last=b.id;closeP()}
+// ---- panels ----
+const P=$('#panel');function closeP(){P.classList.remove('open')}
+function panel(html){P.innerHTML='<button onclick="closeP()">✕ 閉じる</button>'+html;P.classList.add('open')}
+$('#bToc').onclick=()=>{if(!book)return;panel('<h3>目次</h3><ul style="padding:0">'+book.chapters.map((c,i)=>'<li data-i="'+i+'">'+esc(c.title)+'</li>').join('')+'</ul>');
+ P.querySelectorAll('li').forEach(li=>li.onclick=()=>{closeP();go(+$('#c'+li.dataset.i).dataset.first,playing);sents[cur].el.scrollIntoView({block:'center'})})};
+$('#bLib').onclick=async()=>{const bs=(await allBooks()).sort((a,b)=>b.at-a.at);
+ panel('<h3>本棚</h3>'+(bs.length?'':'<p>まだ本がありません</p>')+'<ul style="padding:0">'+bs.map(b=>'<li data-id="'+b.id+'"><b>'+esc(b.title)+'</b><br><small>'+b.chapters.length+'話・'+new Date(b.at).toLocaleString('ja-JP')+'</small> <button data-del="'+b.id+'" style="float:right">削除</button></li>').join('')+'</ul>');
+ P.querySelectorAll('li').forEach(li=>li.onclick=async ev=>{if(ev.target.dataset.del){ev.stopPropagation();if(confirm('削除しますか？')){await delBook(ev.target.dataset.del);if(book&&book.id==ev.target.dataset.del){book=null;location.reload()}else $('#bLib').onclick()}return}openBook(await getBook(li.dataset.id))})};
+$('#bSet').onclick=()=>{loadVoices();panel('<h3>設定</h3><p><label>声</label><br><select id="sv">'+(voices.length?voices.map(v=>'<option value="'+esc(v.voiceURI)+'"'+(v.voiceURI==S.voice?' selected':'')+'>'+esc(v.name)+'</option>').join(''):'<option>標準(日本語)</option>')+'</select></p>'+
+ '<p><label>速さ <span id="lr">'+S.rate+'</span></label><br><input type="range" id="sr" min="0.5" max="2" step="0.1" value="'+S.rate+'"></p>'+
+ '<p><label>高さ <span id="lp">'+S.pitch+'</span></label><br><input type="range" id="sp" min="0.5" max="2" step="0.1" value="'+S.pitch+'"></p>'+
+ '<p><label>文字サイズ <span id="lf">'+S.fs+'</span></label><br><input type="range" id="sf" min="14" max="36" step="1" value="'+S.fs+'"></p>'+
+ '<p><label>表示</label><br><select id="st"><option value="">端末に合わせる</option><option value="light"'+(S.theme=='light'?' selected':'')+'>ライト</option><option value="dark"'+(S.theme=='dark'?' selected':'')+'>ダーク</option></select></p><p><button id="test">🔊 試聴</button></p>');
+ const sv=()=>{localStorage.nr_set=JSON.stringify(S);apply()};
+ $('#sv').onchange=e=>{S.voice=e.target.value;sv()};$('#sr').oninput=e=>{S.rate=+e.target.value;$('#lr').textContent=S.rate;sv()};
+ $('#sp').oninput=e=>{S.pitch=+e.target.value;$('#lp').textContent=S.pitch;sv()};$('#sf').oninput=e=>{S.fs=+e.target.value;$('#lf').textContent=S.fs;sv()};
+ $('#st').onchange=e=>{S.theme=e.target.value;sv()};
+ $('#test').onclick=()=>{syn.cancel();const u=new SpeechSynthesisUtterance('こんにちは。この声で朗読します。');u.lang='ja-JP';u.rate=S.rate;u.pitch=S.pitch;const v=voices.find(v=>v.voiceURI==S.voice);if(v)u.voice=v;syn.speak(u)}};
+function apply(){document.documentElement.style.setProperty('--fs',S.fs+'px');document.body.className=S.theme}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+document.addEventListener('visibilitychange',()=>{if(book)putBook(book)});
+apply();(async()=>{const id=localStorage.nr_last;if(id){const b=await getBook(id);if(b)openBook(b)}})();
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script></body></html>
