@@ -19,12 +19,19 @@ button,select{font-size:16px;padding:8px 10px;border-radius:10px;border:1px soli
 #panel.open{display:block}#panel li{padding:10px 4px;border-bottom:1px solid var(--bd);list-style:none;cursor:pointer}
 label{font-size:14px;color:var(--sub)}input[type=range]{width:120px}#empty{color:var(--sub);text-align:center;margin-top:30vh}
 </style></head><body>
-<header><button id="bOpen">📂 開く</button><button id="bLib">📚 本棚</button><button id="bToc">📑 目次</button><button id="bSet">⚙️</button>
+<header><button id="bOpen">📂 開く</button><button id="bLib">📚 本棚</button><button id="bToc">📑 目次</button><button id="bAud">🎧 音声を開く</button><button id="bSet">⚙️</button>
+<input type="file" id="afile" accept="audio/*,.mp3,.m4a" multiple hidden>
 <input type="file" id="file" accept=".txt,text/plain" multiple hidden></header>
 <div id="text"><div id="empty">「📂 開く」から、ファイルアプリの小説テキスト(.txt)を選んでください。<br>複数ファイルもまとめて選べます。</div></div>
 <div id="player"><div class="row" id="info" style="font-size:13px;color:var(--sub)"></div>
 <div class="row"><button id="bPrev">⏮</button><button id="bPlay">▶️</button><button id="bStop">⏹</button><button id="bNext">⏭</button></div></div>
 <div id="panel"></div>
+<div id="aplayer" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:8;padding:calc(env(safe-area-inset-top) + 60px) 16px 40px;overflow:auto">
+<h3 id="aTitle" style="margin:0 0 4px"></h3><div id="aTrack" style="color:var(--sub);margin-bottom:10px"></div>
+<audio id="au" controls preload="metadata" style="width:100%"></audio>
+<div class="row" style="margin:12px 0"><button id="aPrev">⏮</button><button id="aBack">-15秒</button><button id="aPlay">▶️</button><button id="aFwd">+30秒</button><button id="aNext">⏭</button></div>
+<div class="row"><label>速さ</label><select id="aRate"><option>0.75</option><option>0.9</option><option selected>1</option><option>1.1</option><option>1.25</option><option>1.5</option><option>1.75</option><option>2</option></select>
+<button id="aClose">📖 テキストに戻る</button></div><ul id="aList" style="padding:0;margin-top:12px"></ul></div>
 <script>
 const $=s=>document.querySelector(s);let S=JSON.parse(localStorage.nr_set||'{}');S={rate:1,pitch:1,fs:21,voice:'',theme:'',...S};
 let book=null,sents=[],cur=0,playing=false,voices=[],gen=0;
@@ -102,5 +109,44 @@ function apply(){document.documentElement.style.setProperty('--fs',S.fs+'px');do
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 document.addEventListener('visibilitychange',()=>{if(book)putBook(book)});
 apply();(async()=>{const id=localStorage.nr_last;if(id){const b=await getBook(id);if(b)openBook(b)}})();
+
+// ---- audio mode ----
+const au=$('#au');let abook=null,aidx=0;
+const adb=new Promise((res,rej)=>{const r=indexedDB.open('novelreader-audio',1);r.onupgradeneeded=()=>{r.result.createObjectStore('abooks',{keyPath:'id'});r.result.createObjectStore('blobs')};r.onsuccess=()=>res(r.result);r.onerror=rej});
+async function atx(store,m,f){const db=await adb;return new Promise((res,rej)=>{const t=db.transaction(store,m),r=f(t.objectStore(store));t.oncomplete=()=>res(r&&r.result);t.onerror=()=>rej(t.error)})}
+const saveA=b=>atx('abooks','readwrite',s=>s.put(b)),allA=()=>atx('abooks','readonly',s=>s.getAll());
+$('#bAud').onclick=async()=>{const bs=(await allA()).sort((a,b)=>b.at-a.at);
+ panel('<h3>🎧 音声ブック</h3><p><button id="aPick">＋ MP3を選ぶ(複数可)</button></p><ul style="padding:0">'+bs.map(b=>'<li data-id="'+b.id+'"><b>'+esc(b.title)+'</b><br><small>'+b.tracks.length+'トラック・'+(b.idx+1)+'話目から</small> <button data-del="'+b.id+'" style="float:right">削除</button></li>').join('')+'</ul>');
+ $('#aPick').onclick=()=>$('#afile').click();
+ P.querySelectorAll('li').forEach(li=>li.onclick=async ev=>{const d=ev.target.dataset.del;if(d){ev.stopPropagation();if(!confirm('削除しますか？'))return;const b=bs.find(x=>x.id==d);for(const t of b.tracks)await atx('blobs','readwrite',s=>s.delete(t.key));await atx('abooks','readwrite',s=>s.delete(d));$('#bAud').onclick();return}
+  openA(bs.find(x=>x.id==li.dataset.id))})};
+$('#afile').onchange=async e=>{const fs=[...e.target.files].sort((a,b)=>a.name.localeCompare(b.name,'ja',{numeric:true}));if(!fs.length)return;
+ const id='a'+Date.now(),tracks=[];for(const[i,f]of fs.entries()){const key=id+'_'+i;await atx('blobs','readwrite',s=>s.put(f,key));tracks.push({key,name:f.name.replace(/\.[^.]+$/,'').replace(/^\d+_/,'').replace(/_/g,' ')})}
+ const title=prompt('本のタイトル',fs[0].name.replace(/\.[^.]+$/,'').replace(/^\d+_/,''))||'音声ブック';
+ const b={id,title,tracks,idx:0,time:0,rate:1,at:Date.now()};await saveA(b);e.target.value='';openA(b)};
+async function openA(b){if(playing)pause();closeP();abook=b;$('#aplayer').style.display='block';$('#aTitle').textContent=b.title;$('#aRate').value=String(b.rate||1);
+ $('#aList').innerHTML=b.tracks.map((t,i)=>'<li data-i="'+i+'">'+esc(t.name)+'</li>').join('');
+ $('#aList').querySelectorAll('li').forEach(li=>li.onclick=()=>loadT(+li.dataset.i,0,true));localStorage.nr_mode='audio:'+b.id;await loadT(b.idx||0,b.time||0,false)}
+async function loadT(i,t,autoplay){if(!abook||i<0||i>=abook.tracks.length)return;aidx=i;const tr=abook.tracks[i];
+ const blob=await atx('blobs','readonly',s=>s.get(tr.key));if(au.src)URL.revokeObjectURL(au.src);au.src=URL.createObjectURL(blob);
+ au.playbackRate=abook.rate||1;au.defaultPlaybackRate=abook.rate||1;
+ au.onloadedmetadata=()=>{if(t)au.currentTime=Math.min(t,au.duration-1);au.playbackRate=abook.rate||1};
+ $('#aTrack').textContent=(i+1)+' / '+abook.tracks.length+'：'+tr.name;
+ $('#aList').querySelectorAll('li').forEach((li,k)=>li.style.fontWeight=k==i?'bold':'');
+ if('mediaSession' in navigator)navigator.mediaSession.metadata=new MediaMetadata({title:tr.name,album:abook.title,artist:'小説朗読',artwork:[{src:'icon.png',sizes:'512x512',type:'image/png'}]});
+ abook.idx=i;abook.time=t;abook.at=Date.now();saveA(abook);if(autoplay)au.play().catch(()=>{})}
+au.onended=()=>{if(aidx<abook.tracks.length-1)loadT(aidx+1,0,true);else{abook.idx=0;abook.time=0;saveA(abook)}};
+au.onplay=()=>$('#aPlay').textContent='⏸';au.onpause=()=>{$('#aPlay').textContent='▶️';if(abook){abook.time=au.currentTime;saveA(abook)}};
+let lastSave=0;au.ontimeupdate=()=>{if(abook&&Date.now()-lastSave>5000){lastSave=Date.now();abook.time=au.currentTime;saveA(abook)}
+ if('mediaSession' in navigator&&navigator.mediaSession.setPositionState&&au.duration)try{navigator.mediaSession.setPositionState({duration:au.duration,playbackRate:au.playbackRate,position:au.currentTime})}catch(e){}};
+const seek=d=>au.currentTime=Math.max(0,Math.min((au.duration||0)-0.5,au.currentTime+d));
+$('#aPlay').onclick=()=>au.paused?au.play():au.pause();$('#aBack').onclick=()=>seek(-15);$('#aFwd').onclick=()=>seek(30);
+$('#aPrev').onclick=()=>au.currentTime>5?au.currentTime=0:loadT(aidx-1,0,!au.paused);$('#aNext').onclick=()=>loadT(aidx+1,0,!au.paused);
+$('#aRate').onchange=e=>{abook.rate=+e.target.value;au.playbackRate=abook.rate;au.defaultPlaybackRate=abook.rate;saveA(abook)};
+$('#aClose').onclick=()=>{au.pause();$('#aplayer').style.display='none';localStorage.nr_mode=''};
+if('mediaSession' in navigator){const ms=navigator.mediaSession,H=(a,f)=>{try{ms.setActionHandler(a,f)}catch(e){}};
+ H('play',()=>au.play());H('pause',()=>au.pause());H('previoustrack',()=>$('#aPrev').onclick());H('nexttrack',()=>$('#aNext').onclick());
+ H('seekbackward',d=>seek(-(d.seekOffset||15)));H('seekforward',d=>seek(d.seekOffset||30));H('seekto',d=>{au.currentTime=d.seekTime})}
+(async()=>{const m=localStorage.nr_mode||'';if(m.startsWith('audio:')){const b=await atx('abooks','readonly',s=>s.get(m.slice(6)));if(b)openA(b)}})();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script></body></html>
